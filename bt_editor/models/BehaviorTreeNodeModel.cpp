@@ -84,8 +84,8 @@ BehaviorTreeDataModel::BehaviorTreeDataModel(const NodeModel &model):
     // Inline container for collapsed children (hidden by default)
     _inline_container = new QFrame();
     _inline_layout = new QVBoxLayout(_inline_container);
-    _inline_layout->setContentsMargins(4,2,4,2);
-    _inline_layout->setSpacing(2);
+    _inline_layout->setContentsMargins(6,4,6,10);
+    _inline_layout->setSpacing(4);
     _inline_container->setVisible(false);
     _main_layout->addWidget(_inline_container);
     _params_widget->setStyleSheet("color: white;");
@@ -651,6 +651,7 @@ void BehaviorTreeDataModel::rebuildInlineChildren()
             _inline_layout->addWidget(token);
         }
     }
+    if (_inline_container->layout()) _inline_container->layout()->activate();
     _inline_container->adjustSize();
 }
 
@@ -672,7 +673,9 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         rebuildInlineChildren();
         _inline_container->setVisible(true);
         if (_params_widget) _params_widget->setVisible(false);
-        // Ensure the embedded widget grows to contain the inline tokens
+        // Ensure layouts are activated and embedded widget grows to contain inline tokens
+        if (_inline_container->layout()) _inline_container->layout()->activate();
+        if (_main_widget->layout()) _main_widget->layout()->activate();
         _inline_container->adjustSize();
         _main_widget->adjustSize();
         // Resize to sizeHint so NodeGeometry can pick up the new size immediately
@@ -682,6 +685,7 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         int minH = std::max(_main_widget->minimumHeight(), _inline_container->sizeHint().height() + 12);
         _main_widget->setMinimumSize(minW, minH);
         SetSubtreeVisible(*scene, this_node, /*visible*/false, /*include_root*/false);
+        if (auto proxy = _main_widget->graphicsProxyWidget()) proxy->update();
     }
     else
     {
@@ -689,9 +693,11 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         if (_params_widget) _params_widget->setVisible(true);
         // Clear enforced minimums when expanding back
         _main_widget->setMinimumSize(0, 0);
+        if (_main_widget->layout()) _main_widget->layout()->activate();
         _main_widget->adjustSize();
         _main_widget->resize(_main_widget->sizeHint());
-        SetSubtreeVisible(*scene, this_node, /*visible*/true, /*include_root*/false);
+        // Restore descendants visibility respecting any collapsed descendants
+        RestoreVisibilityRespectingCollapsed(*scene, this_node);
         _inline_tokens.clear();
     }
 
@@ -737,8 +743,8 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
         .arg(captionColor.name()).arg(bg));
 
     auto v = new QVBoxLayout(token);
-    v->setContentsMargins(6, 3, 6, 4);
-    v->setSpacing(3);
+    v->setContentsMargins(8, 6, 8, 6);
+    v->setSpacing(4);
 
     // Header row: label
     auto header = new QHBoxLayout();
@@ -771,8 +777,8 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
         childContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         auto childLayout = new QVBoxLayout(childContainer);
         int indent = 12 + depth * 12;
-        childLayout->setContentsMargins(indent, 2, 2, 2);
-        childLayout->setSpacing(3);
+        childLayout->setContentsMargins(indent, 4, 4, 8);
+        childLayout->setSpacing(4);
 
         for (auto gc : grandchildren)
         {
@@ -782,11 +788,13 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
                 childLayout->addWidget(gcToken);
             }
         }
+        childContainer->layout()->activate();
         childContainer->adjustSize();
         v->addWidget(childContainer);
     }
 
     // Make sure token height is at least the size hint computed from nested content
+    v->activate();
     token->adjustSize();
     int content_h = token->sizeHint().height();
     int min_h = std::max(16, std::max(header_h, content_h));

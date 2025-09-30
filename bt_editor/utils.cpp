@@ -12,6 +12,7 @@
 #include <QFile>
 #include "models/SubtreeNodeModel.hpp"
 #include "models/RootNodeModel.hpp"
+#include "models/BehaviorTreeNodeModel.hpp"
 
 using QtNodes::PortLayout;
 using QtNodes::DataModelRegistry;
@@ -223,6 +224,40 @@ void RefreshSceneGraphics(FlowScene &scene)
     {
         scene.setSceneRect(total.adjusted(-50, -50, 50, 50));
     }
+}
+
+void RestoreVisibilityRespectingCollapsed(FlowScene &scene, Node &root_node)
+{
+    std::function<void(Node&)> rec;
+    rec = [&](Node& node)
+    {
+        auto children = getChildren(scene, node, false);
+        for (auto* child : children)
+        {
+            // Show the child node
+            child->nodeGraphicsObject().setVisible(true);
+
+            // Show connections into the child (from its parent)
+            auto const &conn_in = child->nodeState().connections(PortType::In, 0);
+            for (auto const &pair : conn_in)
+            {
+                pair.second->connectionGraphicsObject().setVisible(true);
+            }
+
+            // Respect child's own collapsed state: if collapsed, keep its subtree hidden
+            if (auto bt = dynamic_cast<BehaviorTreeDataModel*>(child->nodeDataModel()))
+            {
+                if (bt->isCollapsed())
+                {
+                    SetSubtreeVisible(scene, *child, /*visible*/false, /*include_root*/false);
+                    continue;
+                }
+            }
+            // Not collapsed: recurse to grandchildren
+            rec(*child);
+        }
+    };
+    rec(root_node);
 }
 
 void RecursiveNodeReorder(AbsBehaviorTree& tree, PortLayout layout)

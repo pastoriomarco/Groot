@@ -92,6 +92,8 @@ public slots:
     // Update a child's inline token (when this node is collapsed) with live status color
     void updateChildTokenStatus(const QtNodes::Node& child, NodeStatus status);
 
+    bool isCollapsed() const { return _collapsed; }
+
 private:
     // collapse/expand inline children for Sequence-like nodes
     bool _collapsed = false;

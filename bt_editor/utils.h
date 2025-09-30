@@ -64,5 +64,10 @@ QColor GetCaptionColorForModel(const NodeModel &model,
 // Does not change positions or collapsed state; only refreshes visuals.
 void RefreshSceneGraphics(QtNodes::FlowScene &scene);
 
+// Restore visibility of a subtree when expanding a node, while respecting the
+// collapsed state of descendant nodes (i.e., keep their subtrees hidden).
+void RestoreVisibilityRespectingCollapsed(QtNodes::FlowScene &scene,
+                                          QtNodes::Node &root_node);
+
 
 #endif // NODE_UTILS_H
