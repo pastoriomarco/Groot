@@ -700,6 +700,10 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
 
     if (_collapsed)
     {
+        // Reset any previous hard constraints before rebuilding
+        _inline_container->setMinimumSize(0, 0);
+        _inline_container->setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+
         rebuildInlineChildren();
         _inline_container->setVisible(true);
         if (_params_widget) _params_widget->setVisible(false);
@@ -707,26 +711,62 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         if (_inline_container->layout()) _inline_container->layout()->activate();
         if (_main_widget->layout()) _main_widget->layout()->activate();
         _inline_container->adjustSize();
+        // In direct-children view, ensure parent size equals stacked one-line tokens and widest token
+        if (!_collapse_nested && _inline_layout)
+        {
+            QMargins m = _inline_layout->contentsMargins();
+            int spacing = _inline_layout->spacing();
+            int n = _inline_layout->count();
+            int sum = m.top() + m.bottom();
+            int maxW = 0;
+            for (int i = 0; i < n; ++i)
+            {
+                if (auto item = _inline_layout->itemAt(i))
+                {
+                    if (auto w = item->widget())
+                    {
+                        QSize sh = w->sizeHint();
+                        sum += sh.height();
+                        maxW = std::max(maxW, sh.width());
+                    }
+                }
+                if (i + 1 < n) sum += spacing;
+            }
+            // Fix container to the exact stacked size in compact mode
+            int containerW = maxW + m.left() + m.right();
+            _inline_container->setMinimumSize(containerW, sum);
+            _inline_container->setMaximumHeight(sum);
+        }
+        // Allow shrink from previous larger collapsed mode
+        _main_widget->setMinimumSize(0, 0);
         _main_widget->adjustSize();
-        // Resize to sizeHint so NodeGeometry can pick up the new size immediately
-        _main_widget->resize(_main_widget->sizeHint());
-        // Guard against under-sized width/height due to layout constraints
-        int minW = std::max(_main_widget->minimumWidth(), _inline_container->sizeHint().width() + 8);
-        int minH = std::max(_main_widget->minimumHeight(), _inline_container->sizeHint().height() + 12);
+        // Enforce a minimum based on inline content, then size exactly to it
+        int minW = _inline_container->sizeHint().width() + 8;
+        int minH = _inline_container->sizeHint().height() + 12;
         _main_widget->setMinimumSize(minW, minH);
+        _main_widget->updateGeometry();
+        _main_widget->resize(minW, minH);
         SetSubtreeVisible(*scene, this_node, /*visible*/false, /*include_root*/false);
         // Remove drop shadow effect while collapsed to avoid offscreen composition
         if (ngo->graphicsEffect())
         {
             ngo->setGraphicsEffect(nullptr);
         }
-        if (auto proxy = _main_widget->graphicsProxyWidget()) proxy->update();
+        if (auto proxy = _main_widget->graphicsProxyWidget())
+        {
+            // Clear previous constraints to allow shrink/grow between modes
+            proxy->setMinimumSize(QSize(0,0));
+            proxy->setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+            proxy->update();
+        }
     }
     else
     {
         _inline_container->setVisible(false);
         if (_params_widget) _params_widget->setVisible(true);
         // Clear enforced minimums when expanding back
+        _inline_container->setMinimumSize(0, 0);
+        _inline_container->setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
         _main_widget->setMinimumSize(0, 0);
         if (_main_widget->layout()) _main_widget->layout()->activate();
         _main_widget->adjustSize();
@@ -791,11 +831,16 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
 
     auto v = new QVBoxLayout(token);
     const bool compact = (maxDepth == 0);
-    v->setContentsMargins( compact ? 8 : 8,
-                           compact ? 4 : 6,
-                           compact ? 8 : 8,
-                           compact ? 4 : 6 );
-    v->setSpacing(compact ? 2 : 4);
+    v->setContentsMargins(compact ? 6 : 8,
+                          compact ? 2 : 6,
+                          compact ? 6 : 8,
+                          compact ? 2 : 6);
+    v->setSpacing(compact ? 1 : 4);
+    if (compact)
+    {
+        // Let the layout shrink-wrap the single-line content
+        v->setSizeConstraint(QLayout::SetMinimumSize);
+    }
 
     // Header row: label
     auto header = new QHBoxLayout();
@@ -807,7 +852,7 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
     label->setFont(font);
     label->setAlignment(Qt::AlignLeft);
     label->setStyleSheet("color: white; background: transparent;");
-    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    label->setSizePolicy(QSizePolicy::Expanding, compact ? QSizePolicy::Fixed : QSizePolicy::Minimum);
     // Base minimums for header line
     QFontMetrics fm(font);
     int header_h = fm.height() + (compact ? 2 : 6);
@@ -828,8 +873,8 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
         childContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         auto childLayout = new QVBoxLayout(childContainer);
         int indent = 12 + depth * 12;
-        childLayout->setContentsMargins(indent, compact ? 2 : 4, 4, compact ? 4 : 8);
-        childLayout->setSpacing(compact ? 2 : 4);
+        childLayout->setContentsMargins(indent, compact ? 1 : 4, 4, compact ? 3 : 8);
+        childLayout->setSpacing(compact ? 1 : 4);
 
         for (auto gc : grandchildren)
         {
@@ -844,12 +889,22 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
         v->addWidget(childContainer);
     }
 
-    // Make sure token height is at least the size hint computed from nested content
+    // Make sure token height is constrained to one text line (plus padding) in compact mode
     v->activate();
     token->adjustSize();
-    int content_h = token->sizeHint().height();
-    int min_h = std::max(compact ? 18 : 16, std::max(header_h, content_h));
-    token->setMinimumHeight(min_h);
+    if (compact)
+    {
+        int one_line_h = fm.height() + 4; // 1 line + small padding
+        token->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        token->setMinimumHeight(one_line_h);
+        label->setFixedHeight(fm.height());
+    }
+    else
+    {
+        int content_h = token->sizeHint().height();
+        int min_h = std::max(16, std::max(header_h, content_h));
+        token->setMinimumHeight(min_h);
+    }
 
     return token;
 }
