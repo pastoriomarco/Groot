@@ -430,11 +430,8 @@ QJsonObject BehaviorTreeDataModel::save() const
         }
     }
 
-    // Persist collapsed state for Sequence-like nodes
-    if (isSequenceLike())
-    {
-        modelJson["collapsed"] = _collapsed;
-    }
+    // Persist collapsed state for all nodes
+    modelJson["collapsed"] = _collapsed;
 
     return modelJson;
 }
@@ -463,13 +460,10 @@ void BehaviorTreeDataModel::restore(const QJsonObject &modelJson)
         }
     }
 
-    if (isSequenceLike())
+    if (_collapsed)
     {
-        if (_collapsed)
-        {
-            // Defer until scene has restored connections
-            QTimer::singleShot(0, [this]() { setCollapsed(true); });
-        }
+        // Defer until scene has restored connections
+        QTimer::singleShot(0, [this]() { setCollapsed(true); });
     }
 
 }
@@ -525,43 +519,39 @@ bool BehaviorTreeDataModel::eventFilter(QObject *obj, QEvent *event)
         QPainter paint(_caption_logo_left);
         _icon_renderer->render(&paint);
     }
-    // Toggle collapse: prefer Right-Click anywhere on header/main to avoid interfering with view panning.
-    // Left-Click only on the right caption area (small chevron zone).
-    if (isSequenceLike())
+    // Toggle collapse: Middle-click (monitor/locked) or Left-click on chevron (editor)
+    // Determine if node is locked (Monitor mode typically locks nodes)
+    bool node_locked = false;
+    if (_main_widget)
     {
-        // Determine if node is locked (Monitor mode typically locks nodes)
-        bool node_locked = false;
-        if (_main_widget)
+        if (auto proxy = _main_widget->graphicsProxyWidget())
         {
-            if (auto proxy = _main_widget->graphicsProxyWidget())
+            if (auto ngo = dynamic_cast<QtNodes::NodeGraphicsObject*>(proxy->parentItem()))
             {
-                if (auto ngo = dynamic_cast<QtNodes::NodeGraphicsObject*>(proxy->parentItem()))
-                {
-                    node_locked = !(ngo->flags() & QGraphicsItem::ItemIsMovable);
-                }
+                node_locked = !(ngo->flags() & QGraphicsItem::ItemIsMovable);
             }
         }
+    }
 
-        // Middle-click press toggles and consumes the event (when locked/monitor to avoid conflicting with panning).
-        if (event->type() == QEvent::MouseButtonPress &&
-            (obj == _caption_logo_right || obj == _caption_label || obj == _main_widget))
+    // Middle-click press toggles and consumes the event (when locked/monitor to avoid conflicting with panning).
+    if (event->type() == QEvent::MouseButtonPress &&
+        (obj == _caption_logo_right || obj == _caption_label || obj == _main_widget))
+    {
+        auto me = static_cast<QMouseEvent*>(event);
+        if (node_locked && me->button() == Qt::MiddleButton)
         {
-            auto me = static_cast<QMouseEvent*>(event);
-            if (node_locked && me->button() == Qt::MiddleButton)
-            {
-                toggleCollapsed();
-                return true; // stop context menus and scene panning
-            }
+            toggleCollapsed();
+            return true; // stop context menus and scene panning
         }
-        // Left-click release toggles only when clicking the explicit right header area.
-        if (event->type() == QEvent::MouseButtonRelease && obj == _caption_logo_right)
+    }
+    // Left-click release toggles only when clicking the explicit right header area (editor/unlocked).
+    if (event->type() == QEvent::MouseButtonRelease && obj == _caption_logo_right)
+    {
+        auto me = static_cast<QMouseEvent*>(event);
+        if (!node_locked && me->button() == Qt::LeftButton)
         {
-            auto me = static_cast<QMouseEvent*>(event);
-            if (me->button() == Qt::LeftButton)
-            {
-                toggleCollapsed();
-                return true;
-            }
+            toggleCollapsed();
+            return true;
         }
     }
     return NodeDataModel::eventFilter(obj, event);
@@ -616,19 +606,16 @@ void GrootLineEdit::focusOutEvent(QFocusEvent *ev)
 
 bool BehaviorTreeDataModel::isSequenceLike() const
 {
-    if (_model.type != NodeType::CONTROL) return false;
-    const QString &id = _model.registration_ID;
-    return (id == "Sequence" || id == "SequenceStar" || id == "ReactiveSequence");
+    // Make every node collapsible; this selector now always returns true
+    Q_UNUSED(_model);
+    return true;
 }
 
 void BehaviorTreeDataModel::connectCollapseToggleUI()
 {
-    if (isSequenceLike())
-    {
-        _caption_logo_right->setFixedWidth(16);
-        _caption_logo_right->setToolTip("Toggle collapse (Left-click in editor, Middle-click in monitor)");
-        _caption_logo_right->setCursor(Qt::PointingHandCursor);
-    }
+    _caption_logo_right->setFixedWidth(16);
+    _caption_logo_right->setToolTip("Toggle collapse (Left-click in editor, Middle-click in monitor)");
+    _caption_logo_right->setCursor(Qt::PointingHandCursor);
 }
 
 void BehaviorTreeDataModel::rebuildInlineChildren()
@@ -698,7 +685,6 @@ void BehaviorTreeDataModel::rebuildInlineChildren()
 
 void BehaviorTreeDataModel::setCollapsed(bool collapsed)
 {
-    if (!isSequenceLike()) return;
     _collapsed = collapsed;
 
     auto proxy = _main_widget->graphicsProxyWidget();
@@ -714,11 +700,13 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
     {
         rebuildInlineChildren();
         _inline_container->setVisible(true);
+        if (_params_widget) _params_widget->setVisible(false);
         SetSubtreeVisible(*scene, this_node, /*visible*/false, /*include_root*/false);
     }
     else
     {
         _inline_container->setVisible(false);
+        if (_params_widget) _params_widget->setVisible(true);
         SetSubtreeVisible(*scene, this_node, /*visible*/true, /*include_root*/false);
         _inline_tokens.clear();
     }
@@ -727,6 +715,16 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
     ngo->setGeometryChanged();
     ngo->update();
     ngo->moveConnections();
+
+    // In Monitor mode (locked), reflow the entire tree so new node sizes are
+    // factored into positions; in Editor, don't auto-reflow.
+    bool node_locked = !(ngo->flags() & QGraphicsItem::ItemIsMovable);
+    if (node_locked)
+    {
+        auto abs_tree = BuildTreeFromScene(scene);
+        NodeReorder(*scene, abs_tree);
+        RefreshSceneGraphics(*scene);
+    }
 }
 
 void BehaviorTreeDataModel::toggleCollapsed()

@@ -60,5 +60,9 @@ void SetSubtreeVisible(QtNodes::FlowScene &scene,
 QColor GetCaptionColorForModel(const NodeModel &model,
                                const QColor &defaultColor = QColor("#ffffff"));
 
+// Recalculate geometry and move connections for all nodes + connections in the scene.
+// Does not change positions or collapsed state; only refreshes visuals.
+void RefreshSceneGraphics(QtNodes::FlowScene &scene);
+
 
 #endif // NODE_UTILS_H

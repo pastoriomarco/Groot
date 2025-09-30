@@ -187,6 +187,44 @@ QColor GetCaptionColorForModel(const NodeModel &model, const QColor &defaultColo
     return c.isValid() ? c : defaultColor;
 }
 
+void RefreshSceneGraphics(FlowScene &scene)
+{
+    // Update all nodes geometry and connections
+    for (auto &pair : scene.nodes())
+    {
+        Node *n = pair.second.get();
+        if (!n) continue;
+        auto &ngo = n->nodeGraphicsObject();
+        ngo.setGeometryChanged();
+        n->nodeGeometry().recalculateSize();
+        ngo.update();
+        ngo.moveConnections();
+    }
+    // Ensure all connections are moved at least once
+    for (auto &cpair : scene.connections())
+    {
+        auto &cgo = cpair.second->connectionGraphicsObject();
+        cgo.move();
+        cgo.update();
+    }
+
+    // Expand scene rect to encompass all nodes
+    QRectF total;
+    bool first = true;
+    for (auto &pair : scene.nodes())
+    {
+        Node *n = pair.second.get();
+        if (!n) continue;
+        auto rect = n->nodeGraphicsObject().mapToScene(n->nodeGraphicsObject().boundingRect()).boundingRect();
+        if (first) { total = rect; first = false; }
+        else { total = total.united(rect); }
+    }
+    if (!first)
+    {
+        scene.setSceneRect(total.adjusted(-50, -50, 50, 50));
+    }
+}
+
 void RecursiveNodeReorder(AbsBehaviorTree& tree, PortLayout layout)
 {
     std::function<void(unsigned, AbstractTreeNode*)> recursiveStep;
