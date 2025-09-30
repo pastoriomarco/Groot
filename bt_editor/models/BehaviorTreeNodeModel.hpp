@@ -91,12 +91,13 @@ public slots:
 
     // Update a child's inline token (when this node is collapsed) with live status color
     void updateChildTokenStatus(const QtNodes::Node& child, NodeStatus status);
-
     bool isCollapsed() const { return _collapsed; }
+    void cycleCollapseMode();
 
 private:
     // collapse/expand inline children for Sequence-like nodes
     bool _collapsed = false;
+    bool _collapse_nested = true; // true: nested subtree, false: direct children only
     QFrame* _inline_container = nullptr;
     QVBoxLayout* _inline_layout = nullptr;
     QHash<QUuid, QFrame*> _inline_tokens; // child node id -> token widget
@@ -104,7 +105,8 @@ private:
     void rebuildInlineChildren();
     QFrame* buildInlineTokenForNode(QtNodes::Node* node,
                                     QtNodes::FlowScene* scene,
-                                    int depth);
+                                    int depth,
+                                    int maxDepth);
     void setCollapsed(bool collapsed);
     void toggleCollapsed();
     void connectCollapseToggleUI();

@@ -105,6 +105,9 @@ updateEmbeddedQWidget()
 
     _proxyWidget->setPreferredWidth(5);
 
+    // Ensure the embedded widget renders above the parent's paint
+    _proxyWidget->setZValue(zValue() + 1.0);
+
     geom.recalculateSize();
 
     _proxyWidget->setPos(geom.widgetPosition());
@@ -373,6 +376,7 @@ hoverEnterEvent(QGraphicsSceneHoverEvent * event)
   }
   // bring this node forward
   setZValue(1.0);
+  if (_proxyWidget) { _proxyWidget->setZValue(zValue() + 1.0); }
 
   _node.nodeGeometry().setHovered(true);
   update();
@@ -388,6 +392,7 @@ hoverLeaveEvent(QGraphicsSceneHoverEvent * event)
   _node.nodeGeometry().setHovered(false);
   update();
   _scene.nodeHoverLeft(node());
+  if (_proxyWidget) { _proxyWidget->setZValue(zValue() + 1.0); }
   event->accept();
 }
 

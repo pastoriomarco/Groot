@@ -15,6 +15,8 @@
 #include <nodes/internal/NodeGraphicsObject.hpp>
 #include <QGraphicsProxyWidget>
 #include <QGraphicsItem>
+#include <QGraphicsDropShadowEffect>
+#include <climits>
 
 const int MARGIN = 10;
 const int DEFAULT_LINE_WIDTH  = 100;
@@ -432,6 +434,7 @@ QJsonObject BehaviorTreeDataModel::save() const
 
     // Persist collapsed state for all nodes
     modelJson["collapsed"] = _collapsed;
+    modelJson["collapse_nested"] = _collapse_nested;
 
     return modelJson;
 }
@@ -452,6 +455,10 @@ void BehaviorTreeDataModel::restore(const QJsonObject &modelJson)
             if (it.key() == "collapsed")
             {
                 _collapsed = it.value().toBool(false);
+            }
+            else if (it.key() == "collapse_nested")
+            {
+                _collapse_nested = it.value().toBool(true);
             }
             else
             {
@@ -519,7 +526,7 @@ bool BehaviorTreeDataModel::eventFilter(QObject *obj, QEvent *event)
         QPainter paint(_caption_logo_left);
         _icon_renderer->render(&paint);
     }
-    // Toggle collapse: Middle-click (monitor/locked) or Left-click on chevron (editor)
+    // Toggle/cycle collapse: Middle-click (monitor/locked cycles) or Left-click on chevron (editor toggles)
     // Determine if node is locked (Monitor mode typically locks nodes)
     bool node_locked = false;
     if (_main_widget)
@@ -533,14 +540,14 @@ bool BehaviorTreeDataModel::eventFilter(QObject *obj, QEvent *event)
         }
     }
 
-    // Middle-click press toggles and consumes the event (when locked/monitor to avoid conflicting with panning).
+    // Middle-click press cycles and consumes the event (when locked/monitor to avoid conflicting with panning).
     if (event->type() == QEvent::MouseButtonPress &&
         (obj == _caption_logo_right || obj == _caption_label || obj == _main_widget))
     {
         auto me = static_cast<QMouseEvent*>(event);
         if (node_locked && me->button() == Qt::MiddleButton)
         {
-            toggleCollapsed();
+            cycleCollapseMode();
             return true; // stop context menus and scene panning
         }
     }
@@ -550,7 +557,15 @@ bool BehaviorTreeDataModel::eventFilter(QObject *obj, QEvent *event)
         auto me = static_cast<QMouseEvent*>(event);
         if (!node_locked && me->button() == Qt::LeftButton)
         {
-            toggleCollapsed();
+            if (!_collapsed)
+            {
+                _collapse_nested = true; // default editor collapse shows nested
+                setCollapsed(true);
+            }
+            else
+            {
+                setCollapsed(false);
+            }
             return true;
         }
     }
@@ -643,9 +658,24 @@ void BehaviorTreeDataModel::rebuildInlineChildren()
 
     auto ordered_children = getChildren(*scene, this_node, true);
 
+    int maxDepth = _collapse_nested ? INT_MAX : 0;
+    // Tighter outer layout for direct-children mode
+    if (_inline_layout)
+    {
+        if (_collapse_nested)
+        {
+            _inline_layout->setContentsMargins(6,4,6,10);
+            _inline_layout->setSpacing(4);
+        }
+        else
+        {
+            _inline_layout->setContentsMargins(6,2,6,6);
+            _inline_layout->setSpacing(2);
+        }
+    }
     for (auto child : ordered_children)
     {
-        auto token = buildInlineTokenForNode(child, scene, 0);
+        auto token = buildInlineTokenForNode(child, scene, 0, maxDepth);
         if (token)
         {
             _inline_layout->addWidget(token);
@@ -685,6 +715,11 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         int minH = std::max(_main_widget->minimumHeight(), _inline_container->sizeHint().height() + 12);
         _main_widget->setMinimumSize(minW, minH);
         SetSubtreeVisible(*scene, this_node, /*visible*/false, /*include_root*/false);
+        // Remove drop shadow effect while collapsed to avoid offscreen composition
+        if (ngo->graphicsEffect())
+        {
+            ngo->setGraphicsEffect(nullptr);
+        }
         if (auto proxy = _main_widget->graphicsProxyWidget()) proxy->update();
     }
     else
@@ -698,6 +733,16 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         _main_widget->resize(_main_widget->sizeHint());
         // Restore descendants visibility respecting any collapsed descendants
         RestoreVisibilityRespectingCollapsed(*scene, this_node);
+        // Restore drop shadow effect
+        if (!ngo->graphicsEffect())
+        {
+            auto effect = new QGraphicsDropShadowEffect;
+            auto nodeStyle = ngo->node().nodeDataModel()->nodeStyle();
+            effect->setOffset(2, 2);
+            effect->setBlurRadius(5);
+            effect->setColor(nodeStyle.ShadowColor);
+            ngo->setGraphicsEffect(effect);
+        }
         _inline_tokens.clear();
     }
 
@@ -719,7 +764,8 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
 
 QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
                                                       QtNodes::FlowScene* scene,
-                                                      int depth)
+                                                      int depth,
+                                                      int maxDepth)
 {
     if (!node || !scene) return nullptr;
 
@@ -728,23 +774,28 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
 
     QColor captionColor = child_bt ? GetCaptionColorForModel(child_bt->model(), QColor("#888888"))
                                    : QColor("#888888");
-    // Default background: light tint based on caption color; status will override at runtime
-    QString bg = QString("rgba(%1,%2,%3,%4)")
-                     .arg(captionColor.red())
-                     .arg(captionColor.green())
-                     .arg(captionColor.blue())
-                     .arg(40);
+    // Default background: semi-transparent tint based on caption color
+    QString defaultBg = QString("rgba(%1,%2,%3,%4)")
+                            .arg(captionColor.red())
+                            .arg(captionColor.green())
+                            .arg(captionColor.blue())
+                            .arg(110); // ~43% opacity
 
     auto token = new QFrame();
     token->setObjectName("inline_token");
     token->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     token->setStyleSheet(QString(
         "QFrame#inline_token { border: 1px solid %1; border-radius: 4px; background-color: %2; }")
-        .arg(captionColor.name()).arg(bg));
+        .arg(captionColor.name()).arg(defaultBg));
+    token->setAttribute(Qt::WA_StyledBackground, true);
 
     auto v = new QVBoxLayout(token);
-    v->setContentsMargins(8, 6, 8, 6);
-    v->setSpacing(4);
+    const bool compact = (maxDepth == 0);
+    v->setContentsMargins( compact ? 8 : 8,
+                           compact ? 4 : 6,
+                           compact ? 8 : 8,
+                           compact ? 4 : 6 );
+    v->setSpacing(compact ? 2 : 4);
 
     // Header row: label
     auto header = new QHBoxLayout();
@@ -759,7 +810,7 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
     label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     // Base minimums for header line
     QFontMetrics fm(font);
-    int header_h = fm.height() + 6;
+    int header_h = fm.height() + (compact ? 2 : 6);
     label->setMinimumHeight(fm.height());
     header->addWidget(label);
     header->addStretch();
@@ -770,19 +821,19 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
 
     // Recurse into children, if any
     auto grandchildren = getChildren(*scene, *node, true);
-    if (!grandchildren.empty())
+    if (!grandchildren.empty() && (maxDepth < 0 || depth < maxDepth))
     {
         // Container with indent for children
         auto childContainer = new QWidget();
         childContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
         auto childLayout = new QVBoxLayout(childContainer);
         int indent = 12 + depth * 12;
-        childLayout->setContentsMargins(indent, 4, 4, 8);
-        childLayout->setSpacing(4);
+        childLayout->setContentsMargins(indent, compact ? 2 : 4, 4, compact ? 4 : 8);
+        childLayout->setSpacing(compact ? 2 : 4);
 
         for (auto gc : grandchildren)
         {
-            auto gcToken = buildInlineTokenForNode(gc, scene, depth + 1);
+            auto gcToken = buildInlineTokenForNode(gc, scene, depth + 1, maxDepth);
             if (gcToken)
             {
                 childLayout->addWidget(gcToken);
@@ -797,7 +848,7 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
     v->activate();
     token->adjustSize();
     int content_h = token->sizeHint().height();
-    int min_h = std::max(16, std::max(header_h, content_h));
+    int min_h = std::max(compact ? 18 : 16, std::max(header_h, content_h));
     token->setMinimumHeight(min_h);
 
     return token;
@@ -806,6 +857,25 @@ QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
 void BehaviorTreeDataModel::toggleCollapsed()
 {
     setCollapsed(!_collapsed);
+}
+
+void BehaviorTreeDataModel::cycleCollapseMode()
+{
+    // Cycle: Expanded -> Nested -> DirectChildren -> Expanded ...
+    if (!_collapsed)
+    {
+        _collapse_nested = true;
+        setCollapsed(true);
+    }
+    else if (_collapse_nested)
+    {
+        _collapse_nested = false;
+        setCollapsed(true);
+    }
+    else
+    {
+        setCollapsed(false);
+    }
 }
 
 void BehaviorTreeDataModel::updateChildTokenStatus(const QtNodes::Node& child, NodeStatus status)
@@ -827,13 +897,14 @@ void BehaviorTreeDataModel::updateChildTokenStatus(const QtNodes::Node& child, N
     auto stylePair = getStyleFromStatus(status, NodeStatus::IDLE);
     QColor statusColor = stylePair.first.NormalBoundaryColor;
 
+    // Semi-transparent status background to keep overlay look without washing out colors
     QString bg = QString("rgba(%1,%2,%3,%4)")
                      .arg(statusColor.red())
                      .arg(statusColor.green())
                      .arg(statusColor.blue())
-                     .arg(60); // stronger tint by status
-
+                     .arg(120); // ~47% opacity
     token->setStyleSheet(QString(
         "QFrame#inline_token { border: 1px solid %1; border-radius: 4px; background-color: %2; }")
         .arg(typeColor.name()).arg(bg));
+    token->setAttribute(Qt::WA_StyledBackground, true);
 }
