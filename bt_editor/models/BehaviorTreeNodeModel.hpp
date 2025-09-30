@@ -7,6 +7,7 @@
 #include <QFormLayout>
 #include <QEvent>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QHash>
 #include <QUuid>
 #include <nodes/NodeDataModel>
@@ -99,6 +100,9 @@ private:
     QHash<QUuid, QFrame*> _inline_tokens; // child node id -> token widget
     bool isSequenceLike() const;
     void rebuildInlineChildren();
+    QFrame* buildInlineTokenForNode(QtNodes::Node* node,
+                                    QtNodes::FlowScene* scene,
+                                    int depth);
     void setCollapsed(bool collapsed);
     void toggleCollapsed();
     void connectCollapseToggleUI();

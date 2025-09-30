@@ -643,44 +643,15 @@ void BehaviorTreeDataModel::rebuildInlineChildren()
 
     auto ordered_children = getChildren(*scene, this_node, true);
 
-    QFont font;
-    font.setPointSize(10);
     for (auto child : ordered_children)
     {
-        auto child_model = dynamic_cast<BehaviorTreeDataModel*>(child->nodeDataModel());
-        QString text = child_model ? child_model->instanceName() : QStringLiteral("<child>");
-
-        // Token frame with border/background using the child's caption color
-        QColor captionColor = child_model ? GetCaptionColorForModel(child_model->model(), QColor("#888888"))
-                                          : QColor("#888888");
-        QString bg = QString("rgba(%1,%2,%3,%4)")
-                         .arg(captionColor.red())
-                         .arg(captionColor.green())
-                         .arg(captionColor.blue())
-                         .arg(40); // light tint
-
-        auto token = new QFrame();
-        token->setObjectName("inline_token");
-        token->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-        token->setStyleSheet(QString(
-            "QFrame#inline_token { border: 1px solid %1; border-radius: 4px; background-color: %2; }")
-            .arg(captionColor.name()).arg(bg));
-
-        auto hl = new QHBoxLayout(token);
-        hl->setContentsMargins(6, 2, 6, 2);
-        hl->setSpacing(4);
-        auto label = new QLabel(text);
-        label->setFont(font);
-        label->setAlignment(Qt::AlignLeft);
-        label->setStyleSheet("color: white; background: transparent;");
-        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
-        hl->addWidget(label);
-
-        _inline_layout->addWidget(token);
-
-        // map child id -> token for live status updates
-        _inline_tokens.insert(child->id(), token);
+        auto token = buildInlineTokenForNode(child, scene, 0);
+        if (token)
+        {
+            _inline_layout->addWidget(token);
+        }
     }
+    _inline_container->adjustSize();
 }
 
 void BehaviorTreeDataModel::setCollapsed(bool collapsed)
@@ -701,12 +672,25 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         rebuildInlineChildren();
         _inline_container->setVisible(true);
         if (_params_widget) _params_widget->setVisible(false);
+        // Ensure the embedded widget grows to contain the inline tokens
+        _inline_container->adjustSize();
+        _main_widget->adjustSize();
+        // Resize to sizeHint so NodeGeometry can pick up the new size immediately
+        _main_widget->resize(_main_widget->sizeHint());
+        // Guard against under-sized width/height due to layout constraints
+        int minW = std::max(_main_widget->minimumWidth(), _inline_container->sizeHint().width() + 8);
+        int minH = std::max(_main_widget->minimumHeight(), _inline_container->sizeHint().height() + 12);
+        _main_widget->setMinimumSize(minW, minH);
         SetSubtreeVisible(*scene, this_node, /*visible*/false, /*include_root*/false);
     }
     else
     {
         _inline_container->setVisible(false);
         if (_params_widget) _params_widget->setVisible(true);
+        // Clear enforced minimums when expanding back
+        _main_widget->setMinimumSize(0, 0);
+        _main_widget->adjustSize();
+        _main_widget->resize(_main_widget->sizeHint());
         SetSubtreeVisible(*scene, this_node, /*visible*/true, /*include_root*/false);
         _inline_tokens.clear();
     }
@@ -725,6 +709,90 @@ void BehaviorTreeDataModel::setCollapsed(bool collapsed)
         NodeReorder(*scene, abs_tree);
         RefreshSceneGraphics(*scene);
     }
+}
+
+QFrame* BehaviorTreeDataModel::buildInlineTokenForNode(QtNodes::Node* node,
+                                                      QtNodes::FlowScene* scene,
+                                                      int depth)
+{
+    if (!node || !scene) return nullptr;
+
+    auto child_bt = dynamic_cast<BehaviorTreeDataModel*>(node->nodeDataModel());
+    QString text = child_bt ? child_bt->instanceName() : QStringLiteral("<node>");
+
+    QColor captionColor = child_bt ? GetCaptionColorForModel(child_bt->model(), QColor("#888888"))
+                                   : QColor("#888888");
+    // Default background: light tint based on caption color; status will override at runtime
+    QString bg = QString("rgba(%1,%2,%3,%4)")
+                     .arg(captionColor.red())
+                     .arg(captionColor.green())
+                     .arg(captionColor.blue())
+                     .arg(40);
+
+    auto token = new QFrame();
+    token->setObjectName("inline_token");
+    token->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    token->setStyleSheet(QString(
+        "QFrame#inline_token { border: 1px solid %1; border-radius: 4px; background-color: %2; }")
+        .arg(captionColor.name()).arg(bg));
+
+    auto v = new QVBoxLayout(token);
+    v->setContentsMargins(6, 3, 6, 4);
+    v->setSpacing(3);
+
+    // Header row: label
+    auto header = new QHBoxLayout();
+    header->setContentsMargins(0, 0, 0, 0);
+    header->setSpacing(4);
+
+    QFont font; font.setPointSize(10);
+    auto label = new QLabel(text);
+    label->setFont(font);
+    label->setAlignment(Qt::AlignLeft);
+    label->setStyleSheet("color: white; background: transparent;");
+    label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+    // Base minimums for header line
+    QFontMetrics fm(font);
+    int header_h = fm.height() + 6;
+    label->setMinimumHeight(fm.height());
+    header->addWidget(label);
+    header->addStretch();
+    v->addLayout(header);
+
+    // Store mapping for live status updates
+    _inline_tokens.insert(node->id(), token);
+
+    // Recurse into children, if any
+    auto grandchildren = getChildren(*scene, *node, true);
+    if (!grandchildren.empty())
+    {
+        // Container with indent for children
+        auto childContainer = new QWidget();
+        childContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+        auto childLayout = new QVBoxLayout(childContainer);
+        int indent = 12 + depth * 12;
+        childLayout->setContentsMargins(indent, 2, 2, 2);
+        childLayout->setSpacing(3);
+
+        for (auto gc : grandchildren)
+        {
+            auto gcToken = buildInlineTokenForNode(gc, scene, depth + 1);
+            if (gcToken)
+            {
+                childLayout->addWidget(gcToken);
+            }
+        }
+        childContainer->adjustSize();
+        v->addWidget(childContainer);
+    }
+
+    // Make sure token height is at least the size hint computed from nested content
+    token->adjustSize();
+    int content_h = token->sizeHint().height();
+    int min_h = std::max(16, std::max(header_h, content_h));
+    token->setMinimumHeight(min_h);
+
+    return token;
 }
 
 void BehaviorTreeDataModel::toggleCollapsed()
