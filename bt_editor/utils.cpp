@@ -6,6 +6,10 @@
 #include "nodes/Node"
 #include "nodes/DataModelRegistry"
 #include "nodes/internal/memory.hpp"
+#include "nodes/internal/ConnectionGraphicsObject.hpp"
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QFile>
 #include "models/SubtreeNodeModel.hpp"
 #include "models/RootNodeModel.hpp"
 
@@ -85,6 +89,103 @@ std::vector<Node*> getChildren(const QtNodes::FlowScene &scene,
 
 
 //---------------------------------------------------
+
+std::set<Node*> GetSubtreeNodesRecursively(const FlowScene &scene,
+                                           Node &root_node,
+                                           bool include_root)
+{
+    std::set<Node*> nodes;
+    if (include_root) nodes.insert(&root_node);
+
+    std::function<void(Node&)> selectRecursively;
+    selectRecursively = [&](Node& node)
+    {
+        auto children = getChildren(scene, node, false);
+        for (auto child : children)
+        {
+            if (nodes.insert(child).second)
+            {
+                selectRecursively(*child);
+            }
+        }
+    };
+    selectRecursively(root_node);
+    return nodes;
+}
+
+void SetSubtreeVisible(FlowScene &scene,
+                       Node &root_node,
+                       bool visible,
+                       bool include_root)
+{
+    auto subtree_nodes = GetSubtreeNodesRecursively(scene, root_node, include_root);
+
+    // toggle node visibility
+    for (auto node : subtree_nodes)
+    {
+        node->nodeGraphicsObject().setVisible(visible);
+    }
+
+    // toggle connection visibility
+    for (const auto &pair : scene.connections())
+    {
+        auto &conn = *pair.second;
+        Node* in = conn.getNode(PortType::In);
+        Node* out = conn.getNode(PortType::Out);
+        if (!in || !out) continue;
+
+        bool touches_hidden = (subtree_nodes.find(in) != subtree_nodes.end()) ||
+                              (subtree_nodes.find(out) != subtree_nodes.end());
+        if (touches_hidden)
+        {
+            conn.connectionGraphicsObject().setVisible(visible);
+        }
+    }
+}
+
+QColor GetCaptionColorForModel(const NodeModel &model, const QColor &defaultColor)
+{
+    // Cache parsed JSON
+    static QJsonObject toplevel_object;
+    static bool loaded = false;
+    if (!loaded)
+    {
+        QFile style_file(":/NodesStyle.json");
+        if (style_file.open(QIODevice::ReadOnly))
+        {
+            QByteArray ba = style_file.readAll();
+            style_file.close();
+            QJsonParseError err;
+            QJsonDocument doc = QJsonDocument::fromJson(ba, &err);
+            if (!doc.isNull() && doc.isObject())
+            {
+                toplevel_object = doc.object();
+                loaded = true;
+            }
+        }
+    }
+
+    auto colorFromKey = [&](const QString &key) -> QColor
+    {
+        if (toplevel_object.contains(key))
+        {
+            QJsonObject cat = toplevel_object[key].toObject();
+            if (cat.contains("caption_color"))
+            {
+                return QColor(cat["caption_color"].toString());
+            }
+        }
+        return QColor();
+    };
+
+    // First try specific registration ID, then general type
+    QColor c = colorFromKey(model.registration_ID);
+    if (!c.isValid())
+    {
+        c = colorFromKey(QString::fromStdString(toStr(model.type)));
+    }
+    return c.isValid() ? c : defaultColor;
+}
 
 void RecursiveNodeReorder(AbsBehaviorTree& tree, PortLayout layout)
 {

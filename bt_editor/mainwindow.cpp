@@ -1612,6 +1612,15 @@ void MainWindow::onChangeNodesStatus(const QString& bt_name,
             conn->setStyle( style.second );
             conn->connectionGraphicsObject().update();
         }
+
+        // If the parent is a collapsed Sequence-like node, update the inline token color
+        if (auto parent_node = GetParentNode(gui_node))
+        {
+            if (auto parent_model = dynamic_cast<BehaviorTreeDataModel*>(parent_node->nodeDataModel()))
+            {
+                parent_model->updateChildTokenStatus(*gui_node, status);
+            }
+        }
     }
 }
 

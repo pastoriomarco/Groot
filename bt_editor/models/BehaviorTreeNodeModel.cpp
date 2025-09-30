@@ -9,6 +9,12 @@
 #include <QFont>
 #include <QApplication>
 #include <QJsonDocument>
+#include <QMouseEvent>
+#include <QTimer>
+#include <nodes/FlowScene>
+#include <nodes/internal/NodeGraphicsObject.hpp>
+#include <QGraphicsProxyWidget>
+#include <QGraphicsItem>
 
 const int MARGIN = 10;
 const int DEFAULT_LINE_WIDTH  = 100;
@@ -41,6 +47,9 @@ BehaviorTreeDataModel::BehaviorTreeDataModel(const NodeModel &model):
     _caption_label->setFixedHeight(20);
 
     _caption_logo_left->installEventFilter(this);
+    _caption_logo_right->installEventFilter(this);
+    _caption_label->installEventFilter(this);
+    _main_widget->installEventFilter(this);
 
     QFont capt_font = _caption_label->font();
     capt_font.setPointSize(12);
@@ -72,6 +81,13 @@ BehaviorTreeDataModel::BehaviorTreeDataModel(const NodeModel &model):
     _form_layout->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
     _main_layout->addWidget(_params_widget);
+    // Inline container for collapsed children (hidden by default)
+    _inline_container = new QFrame();
+    _inline_layout = new QVBoxLayout(_inline_container);
+    _inline_layout->setContentsMargins(4,2,4,2);
+    _inline_layout->setSpacing(2);
+    _inline_container->setVisible(false);
+    _main_layout->addWidget(_inline_container);
     _params_widget->setStyleSheet("color: white;");
 
     _form_layout->setHorizontalSpacing(4);
@@ -171,6 +187,9 @@ BehaviorTreeDataModel::BehaviorTreeDataModel(const NodeModel &model):
     {
         setInstanceName( _line_edit_name->text() );
     });
+
+    // Prepare UI affordance for collapse toggle (only for Sequence-like nodes)
+    connectCollapseToggleUI();
 }
 
 BehaviorTreeDataModel::~BehaviorTreeDataModel()
@@ -216,6 +235,8 @@ void BehaviorTreeDataModel::initWidget()
     _caption_label->adjustSize();
 
     updateNodeSize();
+    // Ensure collapse UI hint (width/cursor) is applied after initWidget adjustments
+    connectCollapseToggleUI();
 }
 
 unsigned int BehaviorTreeDataModel::nPorts(QtNodes::PortType portType) const
@@ -409,6 +430,12 @@ QJsonObject BehaviorTreeDataModel::save() const
         }
     }
 
+    // Persist collapsed state for Sequence-like nodes
+    if (isSequenceLike())
+    {
+        modelJson["collapsed"] = _collapsed;
+    }
+
     return modelJson;
 }
 
@@ -425,7 +452,23 @@ void BehaviorTreeDataModel::restore(const QJsonObject &modelJson)
     {
         if( it.key() != "alias" && it.key() != "name")
         {
-            setPortMapping( it.key(), it.value().toString() );
+            if (it.key() == "collapsed")
+            {
+                _collapsed = it.value().toBool(false);
+            }
+            else
+            {
+                setPortMapping( it.key(), it.value().toString() );
+            }
+        }
+    }
+
+    if (isSequenceLike())
+    {
+        if (_collapsed)
+        {
+            // Defer until scene has restored connections
+            QTimer::singleShot(0, [this]() { setCollapsed(true); });
         }
     }
 
@@ -482,6 +525,45 @@ bool BehaviorTreeDataModel::eventFilter(QObject *obj, QEvent *event)
         QPainter paint(_caption_logo_left);
         _icon_renderer->render(&paint);
     }
+    // Toggle collapse: prefer Right-Click anywhere on header/main to avoid interfering with view panning.
+    // Left-Click only on the right caption area (small chevron zone).
+    if (isSequenceLike())
+    {
+        // Determine if node is locked (Monitor mode typically locks nodes)
+        bool node_locked = false;
+        if (_main_widget)
+        {
+            if (auto proxy = _main_widget->graphicsProxyWidget())
+            {
+                if (auto ngo = dynamic_cast<QtNodes::NodeGraphicsObject*>(proxy->parentItem()))
+                {
+                    node_locked = !(ngo->flags() & QGraphicsItem::ItemIsMovable);
+                }
+            }
+        }
+
+        // Middle-click press toggles and consumes the event (when locked/monitor to avoid conflicting with panning).
+        if (event->type() == QEvent::MouseButtonPress &&
+            (obj == _caption_logo_right || obj == _caption_label || obj == _main_widget))
+        {
+            auto me = static_cast<QMouseEvent*>(event);
+            if (node_locked && me->button() == Qt::MiddleButton)
+            {
+                toggleCollapsed();
+                return true; // stop context menus and scene panning
+            }
+        }
+        // Left-click release toggles only when clicking the explicit right header area.
+        if (event->type() == QEvent::MouseButtonRelease && obj == _caption_logo_right)
+        {
+            auto me = static_cast<QMouseEvent*>(event);
+            if (me->button() == Qt::LeftButton)
+            {
+                toggleCollapsed();
+                return true;
+            }
+        }
+    }
     return NodeDataModel::eventFilter(obj, event);
 }
 
@@ -528,4 +610,156 @@ void GrootLineEdit::focusOutEvent(QFocusEvent *ev)
 {
     QLineEdit::focusOutEvent(ev);
     emit lostFocus();
+}
+
+//------------------- Collapsed Sequence helpers -------------------
+
+bool BehaviorTreeDataModel::isSequenceLike() const
+{
+    if (_model.type != NodeType::CONTROL) return false;
+    const QString &id = _model.registration_ID;
+    return (id == "Sequence" || id == "SequenceStar" || id == "ReactiveSequence");
+}
+
+void BehaviorTreeDataModel::connectCollapseToggleUI()
+{
+    if (isSequenceLike())
+    {
+        _caption_logo_right->setFixedWidth(16);
+        _caption_logo_right->setToolTip("Toggle collapse (Left-click in editor, Middle-click in monitor)");
+        _caption_logo_right->setCursor(Qt::PointingHandCursor);
+    }
+}
+
+void BehaviorTreeDataModel::rebuildInlineChildren()
+{
+    // Clear existing
+    if (_inline_layout)
+    {
+        while (_inline_layout->count() > 0)
+        {
+            auto item = _inline_layout->takeAt(0);
+            if (auto w = item->widget()) w->deleteLater();
+            delete item;
+        }
+    }
+    _inline_tokens.clear();
+
+    auto proxy = _main_widget->graphicsProxyWidget();
+    if (!proxy) return;
+    auto parent_item = proxy->parentItem();
+    auto ngo = dynamic_cast<QtNodes::NodeGraphicsObject*>(parent_item);
+    if (!ngo) return;
+    auto scene = dynamic_cast<QtNodes::FlowScene*>(ngo->scene());
+    if (!scene) return;
+    QtNodes::Node &this_node = ngo->node();
+
+    auto ordered_children = getChildren(*scene, this_node, true);
+
+    QFont font;
+    font.setPointSize(10);
+    for (auto child : ordered_children)
+    {
+        auto child_model = dynamic_cast<BehaviorTreeDataModel*>(child->nodeDataModel());
+        QString text = child_model ? child_model->instanceName() : QStringLiteral("<child>");
+
+        // Token frame with border/background using the child's caption color
+        QColor captionColor = child_model ? GetCaptionColorForModel(child_model->model(), QColor("#888888"))
+                                          : QColor("#888888");
+        QString bg = QString("rgba(%1,%2,%3,%4)")
+                         .arg(captionColor.red())
+                         .arg(captionColor.green())
+                         .arg(captionColor.blue())
+                         .arg(40); // light tint
+
+        auto token = new QFrame();
+        token->setObjectName("inline_token");
+        token->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+        token->setStyleSheet(QString(
+            "QFrame#inline_token { border: 1px solid %1; border-radius: 4px; background-color: %2; }")
+            .arg(captionColor.name()).arg(bg));
+
+        auto hl = new QHBoxLayout(token);
+        hl->setContentsMargins(6, 2, 6, 2);
+        hl->setSpacing(4);
+        auto label = new QLabel(text);
+        label->setFont(font);
+        label->setAlignment(Qt::AlignLeft);
+        label->setStyleSheet("color: white; background: transparent;");
+        label->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+        hl->addWidget(label);
+
+        _inline_layout->addWidget(token);
+
+        // map child id -> token for live status updates
+        _inline_tokens.insert(child->id(), token);
+    }
+}
+
+void BehaviorTreeDataModel::setCollapsed(bool collapsed)
+{
+    if (!isSequenceLike()) return;
+    _collapsed = collapsed;
+
+    auto proxy = _main_widget->graphicsProxyWidget();
+    if (!proxy) return;
+    auto parent_item = proxy->parentItem();
+    auto ngo = dynamic_cast<QtNodes::NodeGraphicsObject*>(parent_item);
+    if (!ngo) return;
+    auto scene = dynamic_cast<QtNodes::FlowScene*>(ngo->scene());
+    if (!scene) return;
+    QtNodes::Node &this_node = ngo->node();
+
+    if (_collapsed)
+    {
+        rebuildInlineChildren();
+        _inline_container->setVisible(true);
+        SetSubtreeVisible(*scene, this_node, /*visible*/false, /*include_root*/false);
+    }
+    else
+    {
+        _inline_container->setVisible(false);
+        SetSubtreeVisible(*scene, this_node, /*visible*/true, /*include_root*/false);
+        _inline_tokens.clear();
+    }
+
+    updateNodeSize();
+    ngo->setGeometryChanged();
+    ngo->update();
+    ngo->moveConnections();
+}
+
+void BehaviorTreeDataModel::toggleCollapsed()
+{
+    setCollapsed(!_collapsed);
+}
+
+void BehaviorTreeDataModel::updateChildTokenStatus(const QtNodes::Node& child, NodeStatus status)
+{
+    if (!_collapsed) return;
+    if (!_inline_container || !_inline_container->isVisible())
+    {
+        // Only update when collapsed and tokens are visible
+    }
+    auto it = _inline_tokens.find(child.id());
+    if (it == _inline_tokens.end()) return;
+
+    auto token = it.value();
+    // Determine border color from child's model type color (stable)
+    auto child_model = dynamic_cast<BehaviorTreeDataModel*>(child.nodeDataModel());
+    QColor typeColor = child_model ? GetCaptionColorForModel(child_model->model(), QColor("#888888"))
+                                   : QColor("#888888");
+    // Determine status color using existing style mapping
+    auto stylePair = getStyleFromStatus(status, NodeStatus::IDLE);
+    QColor statusColor = stylePair.first.NormalBoundaryColor;
+
+    QString bg = QString("rgba(%1,%2,%3,%4)")
+                     .arg(statusColor.red())
+                     .arg(statusColor.green())
+                     .arg(statusColor.blue())
+                     .arg(60); // stronger tint by status
+
+    token->setStyleSheet(QString(
+        "QFrame#inline_token { border: 1px solid %1; border-radius: 4px; background-color: %2; }")
+        .arg(typeColor.name()).arg(bg));
 }

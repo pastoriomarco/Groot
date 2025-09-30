@@ -6,7 +6,11 @@
 #include <QLineEdit>
 #include <QFormLayout>
 #include <QEvent>
+#include <QVBoxLayout>
+#include <QHash>
+#include <QUuid>
 #include <nodes/NodeDataModel>
+#include <nodes/Node>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -84,6 +88,21 @@ public slots:
 
     void onHighlightPortValue(QString value);
 
+    // Update a child's inline token (when this node is collapsed) with live status color
+    void updateChildTokenStatus(const QtNodes::Node& child, NodeStatus status);
+
+private:
+    // collapse/expand inline children for Sequence-like nodes
+    bool _collapsed = false;
+    QFrame* _inline_container = nullptr;
+    QVBoxLayout* _inline_layout = nullptr;
+    QHash<QUuid, QFrame*> _inline_tokens; // child node id -> token widget
+    bool isSequenceLike() const;
+    void rebuildInlineChildren();
+    void setCollapsed(bool collapsed);
+    void toggleCollapsed();
+    void connectCollapseToggleUI();
+
 protected:
 
     QFrame*  _main_widget;
@@ -133,4 +152,3 @@ signals:
     void doubleClicked();
     void lostFocus();
 };
-

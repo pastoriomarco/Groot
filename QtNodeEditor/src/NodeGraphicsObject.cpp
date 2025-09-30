@@ -190,7 +190,14 @@ void
 NodeGraphicsObject::
 mousePressEvent(QGraphicsSceneMouseEvent * event)
 {
-  if(_locked) return;
+  if(_locked)
+  {
+    // Allow embedded widgets (via QGraphicsProxyWidget) to receive mouse events
+    // even when the node itself is locked for editing. This enables UI affordances
+    // like clickable headers in Monitor mode.
+    QGraphicsObject::mousePressEvent(event);
+    return;
+  }
 
   // deselect all other items after this one is selected
   if (!isSelected() && event->modifiers() != Qt::ControlModifier)

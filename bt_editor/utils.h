@@ -2,6 +2,7 @@
 #define NODE_UTILS_H
 
 #include <QDomDocument>
+#include <set>
 #include <nodes/NodeData>
 #include <nodes/FlowScene>
 #include <nodes/NodeStyle>
@@ -40,6 +41,24 @@ BT::NodeType convert( Serialization::NodeType type);
 BT::NodeStatus convert(Serialization::NodeStatus type);
 
 BT::PortDirection convert(Serialization::PortDirection direction);
+
+// Returns the set of nodes in the subtree rooted at root_node (excluding root by default).
+// If include_root is true, the root node is also included.
+std::set<QtNodes::Node*> GetSubtreeNodesRecursively(const QtNodes::FlowScene &scene,
+                                                    QtNodes::Node &root_node,
+                                                    bool include_root = false);
+
+// Set visible flag for all nodes in the subtree (excluding root unless include_root is true)
+// and for all connections attached to those nodes.
+void SetSubtreeVisible(QtNodes::FlowScene &scene,
+                       QtNodes::Node &root_node,
+                       bool visible,
+                       bool include_root = false);
+
+// Fetch per-model caption color defined in resources/NodesStyle.json.
+// If no specific color is found, returns defaultColor.
+QColor GetCaptionColorForModel(const NodeModel &model,
+                               const QColor &defaultColor = QColor("#ffffff"));
 
 
 #endif // NODE_UTILS_H
